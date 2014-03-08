@@ -23,12 +23,17 @@
 #include <netinet/in.h>
 #include <sys/socket.h>
 #include <sys/select.h>
+#include <pthread.h>
 
 #define closesocket(x) close(x)
 #define INVALID_SOCKET (-1)
 #define ARRAY_SIZE(array) (sizeof(array) / sizeof(array[0]))
+#ifndef NO_DEBUG
 #define DBG(x) do { printf("%-20s ", __func__); printf x; putchar('\n'); \
   fflush(stdout); } while(0)
+#else
+#define DBG(x) 
+#endif
 #define LISTENING_QUEUE 5
 #define READ_BUF 2048
 typedef int sock_t;
@@ -94,16 +99,20 @@ struct weifu_server {
   sock_t listening_sock;
 };
 
-
+void weifu_server_init(struct weifu_server *, void *server_data, weifu_callback_t);
 int weifu_send(struct weifu_connection *, const void *buf, int len);
-struct weifu_server* weifu_create_server(void *server_param, weifu_callback_t cb);
 void weifu_destroy_server(struct weifu_server *);
 const char *weifu_set_option(struct weifu_server *server, const char *name, const char *value);
-const char *weifu_get_option(const struct weifu_server *server, const char *name);
+const char *weifu_get_option(struct weifu_server *server, const char *name);
 int weifu_server_start(struct weifu_server*);
 const char *get_option_name(int ind);
 int weifu_poll_server(struct weifu_server *server, int interval);
 void weifu_iterate(struct weifu_server *, weifu_callback_t cb, void *param);
 
+struct weifu_connection *weifu_connect(struct weifu_server *, const char *host,
+                                 int port,void *connection_param);
 
+void *weifu_start_thread(void *(*f)(void *), void *p);
+int weifu_socketpair(sock_t [2]);
+struct weifu_connection *weifu_add_sock(struct weifu_server *s, sock_t sock, void *p);
 #endif

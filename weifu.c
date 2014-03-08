@@ -141,17 +141,7 @@ for (i = 0; default_config_options[i * 2] != NULL; i++) {
   return -1;
 }
 
-static void weifu_server_init(struct weifu_server *s, void *server_data, weifu_callback_t cb) 
-{
-  memset(s, 0, sizeof(*s));
-  s->listening_sock = INVALID_SOCKET;
-  s->server_data = server_data;
-  memset(&s->lsa, 0, sizeof(s->lsa));
-  s->callback = cb;
-  // Ignore SIGPIPE signal, so if client cancels the request, it
-  // won't kill the whole process.
-  signal(SIGPIPE, SIG_IGN);
-}
+
 
 static void weifu_call(struct weifu_connection *conn, enum weifu_event ev, void *p) {
   if (conn->server->callback) conn->server->callback(conn, ev, p);
@@ -301,6 +291,19 @@ static struct weifu_connection *accept_conn(struct weifu_server *server) {
   return c;
 }
 
+void weifu_server_init(struct weifu_server *s, void *server_data, weifu_callback_t cb) 
+{
+  memset(s, 0, sizeof(*s));
+  s->listening_sock = INVALID_SOCKET;
+  s->server_data = server_data;
+  memset(&s->lsa, 0, sizeof(s->lsa));
+  s->callback = cb;
+  // Ignore SIGPIPE signal, so if client cancels the request, it
+  // won't kill the whole process.
+  signal(SIGPIPE, SIG_IGN);
+}
+
+
 int weifu_send(struct weifu_connection *conn, const void *buf, int len) {
   return iobuf_append(&conn->send_iobuf, buf, len);
 }
@@ -338,7 +341,7 @@ const char *get_option_name(int ind)
  *get an option parameter
  *make sure returned value is not NULL
 */
-const char *weifu_get_option(const struct weifu_server *server, const char *name) {
+const char *weifu_get_option(struct weifu_server *server, const char *name) {
   const char **opts = (const char **) server->config_options;
   int i = get_option_index(name);
   return i == -1 ? NULL : opts[i] == NULL ? "" : opts[i];
@@ -392,7 +395,6 @@ int weifu_server_start(struct weifu_server* server)
     exit(EXIT_FAILURE);
   }
     return 0;
-
 }
 
 /*
@@ -509,4 +511,102 @@ void weifu_destroy_server(struct weifu_server *s)
       weifu_close_conn(conn);
     }
 
+}
+
+struct weifu_connection *weifu_connect(struct weifu_server* server, const char *host,
+                                        int port, void *param)
+{
+
+  sock_t sock = INVALID_SOCKET;
+  struct sockaddr_in sin;
+  struct hostent *he = NULL;
+  struct weifu_connection *conn = NULL;
+  int connect_ret_val;
+
+  if (host == NULL || (he = gethostbyname(host)) == NULL ||
+      (sock = socket(AF_INET, SOCK_STREAM, 0)) == INVALID_SOCKET) {
+    DBG(("gethostbyname(%s) failed: %s", host, strerror(errno)));
+    return NULL;
+  }
+
+  sin.sin_family = AF_INET;
+  sin.sin_port = htons((uint16_t) port);
+  sin.sin_addr = * (struct in_addr *) he->h_addr_list[0];
+  set_non_blocking(sock);
+
+  connect_ret_val = connect(sock, (struct sockaddr *) &sin, sizeof(sin));
+  if (weifu_is_error(connect_ret_val)) {
+    closesocket(sock);
+    return NULL;
+  } else if ((conn = (struct weifu_connection *)
+              malloc(sizeof(*conn))) == NULL) {
+    closesocket(sock);
+    return NULL;
+  }
+
+  memset(conn, 0, sizeof(*conn));
+  conn->server = server;
+  conn->sock = sock;
+  conn->connection_data = param;
+  conn->flags = NSF_CONNECTING;
+  conn->last_io_time = time(NULL);
+
+  weifu_add_conn(server, conn);
+  DBG(("%p %s:%d %d", conn, host, port, conn->sock));
+
+  return conn;
+}                                        
+
+
+/*
+ *start a new thread with a function , like taking input from stdin
+*/
+void *weifu_start_thread(void *(*f)(void *), void *p) {
+  pthread_t thread_id = (pthread_t) 0;
+  pthread_attr_t attr;
+
+  (void) pthread_attr_init(&attr);
+  (void) pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+
+  pthread_create(&thread_id, &attr, f, p);
+  pthread_attr_destroy(&attr);
+
+  return (void *) thread_id;
+}
+
+
+/*
+ *create a pair sockets , used to monitor like stdin and send to remote
+*/
+int weifu_socketpair(sock_t sp[2]) {
+  struct sockaddr_in sa;
+  sock_t sock;
+  socklen_t len = sizeof(sa);
+  int ret = 0;
+
+  sp[0] = sp[1] = INVALID_SOCKET;
+
+  (void) memset(&sa, 0, sizeof(sa));
+  sa.sin_family = AF_INET;
+  sa.sin_port = htons(0);
+  sa.sin_addr.s_addr = htonl(0x7f000001);
+
+  if ((sock = socket(AF_INET, SOCK_STREAM, 0)) != INVALID_SOCKET &&
+      !bind(sock, (struct sockaddr *) &sa, len) &&
+      !listen(sock, 1) &&
+      !getsockname(sock, (struct sockaddr *) &sa, &len) &&
+      (sp[0] = socket(AF_INET, SOCK_STREAM, 6)) != -1 &&
+      !connect(sp[0], (struct sockaddr *) &sa, len) &&
+      (sp[1] = accept(sock,(struct sockaddr *) &sa, &len)) != INVALID_SOCKET) {
+    set_close_on_exec(sp[0]);
+    set_close_on_exec(sp[1]);
+    ret = 1;
+  } else {
+    if (sp[0] != INVALID_SOCKET) closesocket(sp[0]);
+    if (sp[1] != INVALID_SOCKET) closesocket(sp[1]);
+    sp[0] = sp[1] = INVALID_SOCKET;
+  }
+  closesocket(sock);
+
+  return ret;
 }
